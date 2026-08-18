@@ -1,0 +1,53 @@
+name: Solve Challenge
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'Challenge 页面 URL'
+        required: true
+        default: 'https://wulass.org/fd0fb2130e/challenge'
+  schedule:
+    # 每天 UTC 00:00 自动运行一次（按需开启）
+    - cron: '0 0 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  solve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run challenge solver
+        id: solver
+        env:
+          TARGET_URL: ${{ github.event.inputs.target_url || 'https://wulass.org/fd0fb2130e/challenge' }}
+        run: node scripts/solve-challenge.js
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: challenge-results
+          path: |
+            challenge-result.json
+            debug-screenshot.png
+          retention-days: 7
+          if-no-files-found: ignore
