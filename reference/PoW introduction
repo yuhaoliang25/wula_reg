@@ -1,0 +1,4 @@
+the website protects registration with Cap (@cap.js), an open-source proof-of-work CAPTCHA. The recaptcha_data token in the register call is just a solved-Cap token. 
+
+PoW solutions (80 nonces) :Pure-Node solvable — I ported the FNV-1a+xorshift PRNG and SHA-256,solved all 80 in ~12s, no browser needed. 
+

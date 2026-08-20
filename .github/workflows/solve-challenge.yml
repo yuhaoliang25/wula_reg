@@ -1,23 +1,24 @@
-name: Solve Challenge
+name: Update Subscription
 
 on:
   workflow_dispatch:
-    inputs:
-      target_url:
-        description: 'Challenge 页面 URL'
-        required: true
-        default: 'https://wulass.org/fd0fb2130e/challenge'
   schedule:
-    # 每天 UTC 00:00 自动运行一次（按需开启）
-    - cron: '0 0 * * *'
+    # 每天 UTC 02:23 (北京时间 10:23) 跑一次。
+    # 订阅是注册后 24h 到期, 想更保险可以再加一行, 例如 '23 14 * * *'。
+    - cron: '23 2 * * *'
 
 permissions:
-  contents: read
+  contents: write
+
+# 避免手动触发和定时任务同时跑, 造成 push 冲突
+concurrency:
+  group: update-subscription
+  cancel-in-progress: false
 
 jobs:
-  solve:
+  update:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -26,7 +27,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -35,19 +36,41 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Run challenge solver
-        id: solver
-        env:
-          TARGET_URL: ${{ github.event.inputs.target_url || 'https://wulass.org/fd0fb2130e/challenge' }}
-        run: node scripts/solve-challenge.js
+      - name: Register and fetch subscription
+        run: npm run solve
 
-      - name: Upload results
+      - name: Commit updated subscription
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git add sub.yaml sub-info.json
+
+          if git diff --cached --quiet; then
+            echo "订阅内容无变化, 跳过提交"
+            exit 0
+          fi
+
+          git commit -m "chore: refresh subscription ($(date -u '+%Y-%m-%d %H:%M UTC'))"
+
+          # 定时任务和手动触发可能撞车, 失败就 rebase 后重试
+          for i in 1 2 3; do
+            if git push; then
+              echo "推送成功"
+              exit 0
+            fi
+            echo "推送失败, 第 $i 次重试…"
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          done
+          echo "::error::推送失败" && exit 1
+
+      - name: Upload logs on failure
+        if: failure()
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: challenge-results
+          name: debug-output
           path: |
-            challenge-result.json
-            debug-screenshot.png
-          retention-days: 7
+            sub-info.json
           if-no-files-found: ignore
+          retention-days: 3

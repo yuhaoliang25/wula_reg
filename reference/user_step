@@ -1,0 +1,44 @@
+to auto-register email&password on wulass.org, with the help of github actions, I conduct several steps below.
+
+curl 'https://wulass.org/api/v1/guest/comm/config' \
+  -H 'referer: https://wulass.org/' \
+  -H 'user-agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0'
+response: {"data":{..other word..,"recaptcha_site_key":"https:\/\/wulass.org\/fd0fb2130e\/",...}}
+from which we know 'recaptcha_site'(here it is 'fd0fb2130e')
+
+curl 'https://wulass.org/fd0fb2130e/challenge' \
+  -X 'POST' \
+  -H 'user-agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0' \
+  -H 'origin: https://wulass.org' \
+  -H 'referer: https://wulass.org/'
+response: {"challenge":{"c":80,"s":32,"d":4},"token":"...","instrumentation":"..."}
+
+
+curl 'https://wulass.org/fd0fb2130e/redeem' \
+  -H 'referer: https://wulass.org/' \
+  -H 'user-agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0' \
+  --data-raw '{"token":the same as the challenge response token,"solutions":[124646,3074,14351,44442,162901,105000,57908,7200,5830,28660,11620,32398,12614,4018,140831,183046,38833,70937,71092,3630,85198,24278,96790,11452,44833,27270,129676,10254,45285,45336,104589,88100,16045,82086,40501,250621,67741,10361,139155,76866,89317,27489,2992,202462,32065,183661,27089,28042,16462,87393,49177,25549,35070,16910,61257,29270,19358,25673,138707,52247,35506,26046,14483,22291,40941,71848,4475,41608,79122,118464,7351,116065,70372,4185,8460,31323,8361,97376,12400,111467],"instr":{"i":"c37f17171672bd7302a0dcd143e52350","state":{"norm03ghm8x8":827193,"dyxz4rju6anp":965146,"bu63ymbavu9m":468943,"jldts9nwqy9a":588835},"ts":1787034200049}}'
+
+the 'redeem' post is called by a script named 'widget.js'(you can find this script in reference.) it solved the challenge by iframe?(I catch what is in the i function and saved content, also in reference.)
+I can't simulate a real browser environment, so my plan is to use playwright or other browser (who can run in github action) to auto-bypass the challenge with the help of widget.js, and fetch the redeem
+response: {
+    "success": true,
+    "token": "fd0fb2130e:fe5f332a1462eded:7a363953417477c00b128c32cf5521",
+} 
+this token is used as recaptcha_data below.
+
+curl 'https://wulass.org/api/v1/passport/auth/register' \
+  --data-raw 'email=efasfda@sa.csc&password=efasfda@sa.csc&recaptcha_data=fd0fb2130e%3Afe5f332a1462eded%3A7a363953417477c00b128c32cf5521'
+we can randomly fill the email and password, because I just want to get new account's 1-day trial. 
+
+finally we get the last response: {
+    "data": {
+        "token": "509bb7013756c5c2565f4fddf1678c24",
+    }
+}
+this token is the key to a mihomo subscription URL below(which expire at 1 day)
+https://windowsv1.com/s/?token=509bb7013756c5c2565f4fddf1678c24
+so we need to use github action to run a register script everyday and update this link.we reach the server through this link and fetch the content , then update the content to a file of my repo, which can be reached by a fixed URL, as a stable subscription link.
+
+---
+One design improvement over your draft: rather than loading their heavy homepage (which timed out here), the script intercepts a stub URL on the wulass.org origin, so the widget's requests are same-origin with no SPA download. Captcha now solves in ~2s.

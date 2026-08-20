@@ -1,11 +1,12 @@
 {
-  "name": "challenge-solver",
+  "name": "wula-reg",
   "version": "1.0.0",
   "private": true,
+  "description": "Auto-register wulass.org trial accounts and publish a stable mihomo subscription",
   "scripts": {
     "solve": "node scripts/solve-challenge.js"
   },
   "dependencies": {
-    "playwright": "^1.49.0"
+    "playwright": "1.62.1"
   }
 }
