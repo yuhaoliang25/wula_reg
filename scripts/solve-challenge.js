@@ -21,7 +21,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('playwright');
+const { chromium, request: pwRequest } = require('playwright');
 
 // ────────────────────────────── 配置 ──────────────────────────────
 const BASE = process.env.WULA_BASE || 'https://wulass.org';
@@ -33,6 +33,12 @@ const WIDGET_FILE = path.resolve(REPO_ROOT, 'vendor/cap-widget.js');
 const ATTEMPTS = Number(process.env.ATTEMPTS || 3);
 const SOLVE_TIMEOUT = Number(process.env.SOLVE_TIMEOUT || 180_000);
 const EMAIL_DOMAIN = process.env.EMAIL_DOMAIN || 'gmail.com';
+
+// 站点会封 GitHub Actions 的机房 IP, 所以 CI 里用 mihomo 起一个本地代理,
+// 把浏览器和所有 API 请求都从代理出去。PROXY_URL 为空则直连。
+// 注意: 必须让"解验证码"和"注册"走同一个出口 IP —— cap token 可能与 IP 绑定。
+const PROXY_URL = (process.env.PROXY_URL || '').trim();
+const proxyOpt = PROXY_URL ? { server: PROXY_URL } : undefined;
 
 const UA =
   process.env.USER_AGENT ||
@@ -92,21 +98,31 @@ const browserHeaders = () => ({
   referer: `${BASE}/`,
 });
 
-async function fetchJson(url, init = {}) {
-  const res = await fetch(url, init);
+// Node 自带的 fetch (undici) 不认 HTTP_PROXY 环境变量, 所以这里统一用
+// Playwright 的 request API —— 它能显式指定代理, 而且不受 CORS 限制。
+async function newApi() {
+  return await pwRequest.newContext({
+    proxy: proxyOpt,
+    extraHTTPHeaders: browserHeaders(),
+    timeout: 60_000,
+  });
+}
+
+async function apiJson(api, url, opts) {
+  const res = opts ? await api.post(url, opts) : await api.get(url);
   const text = await res.text();
   let json;
   try {
     json = JSON.parse(text);
   } catch {
-    throw new Error(`${url} 返回的不是 JSON (HTTP ${res.status}): ${text.slice(0, 200)}`);
+    throw new Error(`${url} 返回的不是 JSON (HTTP ${res.status()}): ${text.slice(0, 200)}`);
   }
-  return { res, json };
+  return { status: res.status(), json };
 }
 
 // ─────────────────────── 1. 取站点 key ───────────────────────
-async function getSiteKey() {
-  const { json } = await fetchJson(`${BASE}/api/v1/guest/comm/config`, { headers: browserHeaders() });
+async function getSiteKey(api) {
+  const { json } = await apiJson(api, `${BASE}/api/v1/guest/comm/config`);
   const data = json && json.data;
   if (!data) throw new Error('config 接口无 data 字段');
 
@@ -135,6 +151,7 @@ async function solveCap(siteKey) {
 
   const browser = await chromium.launch({
     headless: true,
+    proxy: proxyOpt,
     args: [
       '--disable-dev-shm-usage',
       '--no-sandbox',
@@ -150,6 +167,7 @@ async function solveCap(siteKey) {
       userAgent: UA,
       viewport: { width: 1280, height: 800 },
       locale: 'en-US',
+      proxy: proxyOpt,
     });
     await ctx.addInitScript(STEALTH);
 
@@ -214,38 +232,35 @@ async function solveCap(siteKey) {
 }
 
 // ─────────────────────── 3. 注册账号 ───────────────────────
-async function register(capToken) {
+async function register(api, capToken) {
   const email = `${randStr(12)}@${EMAIL_DOMAIN}`;
   const password = randStr(16);
 
-  const body = new URLSearchParams({ email, password });
-  if (capToken) body.set('recaptcha_data', capToken);
+  const form = { email, password };
+  if (capToken) form.recaptcha_data = capToken;
 
-  const { res, json } = await fetchJson(`${BASE}/api/v1/passport/auth/register`, {
-    method: 'POST',
-    headers: { ...browserHeaders(), 'content-type': 'application/x-www-form-urlencoded' },
-    body,
-  });
+  const { status, json } = await apiJson(api, `${BASE}/api/v1/passport/auth/register`, { form });
 
   const token = json && json.data && json.data.token;
   if (!token) {
     const msg = (json && (json.message || json.error)) || JSON.stringify(json).slice(0, 200);
-    throw new Error(`注册失败 (HTTP ${res.status}): ${msg}`);
+    throw new Error(`注册失败 (HTTP ${status}): ${msg}`);
   }
   log(`· 注册成功: ${maskEmail(email)}`);
   return token;
 }
 
 // ─────────────────────── 4. 拉取订阅 ───────────────────────
-async function fetchSubscription(authToken) {
+async function fetchSubscription(api, authToken) {
   const url = `${SUB_HOST}/s/?token=${encodeURIComponent(authToken)}`;
-  const res = await fetch(url, {
+  // 订阅站按 UA 决定返回格式, 必须伪装成 clash 客户端才会给 mihomo 配置
+  const res = await api.get(url, {
     headers: { 'user-agent': process.env.SUB_UA || 'clash-verge/v2.0.0' },
-    redirect: 'follow',
   });
   const text = await res.text();
-  if (!res.ok) throw new Error(`订阅接口 HTTP ${res.status}: ${text.slice(0, 200)}`);
-  return { text, userinfo: res.headers.get('subscription-userinfo') || '' };
+  if (!res.ok()) throw new Error(`订阅接口 HTTP ${res.status()}: ${text.slice(0, 200)}`);
+  const headers = res.headers();
+  return { text, userinfo: headers['subscription-userinfo'] || '' };
 }
 
 // 写入仓库前必须校验 —— 绝不能把报错页面覆盖掉一份好的订阅
@@ -268,17 +283,23 @@ function parseUserinfo(s) {
 
 // ──────────────────────────── 主流程 ────────────────────────────
 async function once() {
-  const siteKey = await getSiteKey();
-  log(`· 站点 key: ${siteKey || '(无需验证码)'}`);
+  const api = await newApi();
+  try {
+    const siteKey = await getSiteKey(api);
+    log(`· 站点 key: ${siteKey || '(无需验证码)'}`);
 
-  const capToken = siteKey ? await solveCap(siteKey) : null;
-  const authToken = await register(capToken);
-  const { text, userinfo } = await fetchSubscription(authToken);
-  validateSubscription(text);
-  return { text, userinfo, authToken };
+    const capToken = siteKey ? await solveCap(siteKey) : null;
+    const authToken = await register(api, capToken);
+    const { text, userinfo } = await fetchSubscription(api, authToken);
+    validateSubscription(text);
+    return { text, userinfo, authToken };
+  } finally {
+    await api.dispose();
+  }
 }
 
 (async () => {
+  log(PROXY_URL ? `· 出口代理: ${PROXY_URL}` : '· 出口代理: 无 (直连)');
   let lastErr;
   for (let i = 1; i <= ATTEMPTS; i++) {
     log(`\n===== 第 ${i}/${ATTEMPTS} 次尝试 =====`);

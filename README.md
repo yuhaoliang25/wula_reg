@@ -81,15 +81,48 @@ npm run solve
 | `ATTEMPTS` | `3` | 整条链路的重试次数 |
 | `EMAIL_DOMAIN` | `gmail.com` | 注册邮箱后缀 |
 | `SOLVE_TIMEOUT` | `180000` | 解验证码超时 (ms) |
+| `PROXY_URL` | 空 (直连) | 出口代理, 如 `http://127.0.0.1:7890` |
+
+## 关于 GitHub 机房 IP 被封
+
+站点会封 GitHub Actions 的 Azure 机房 IP, 所以 workflow 里先用**上一次拿到的
+订阅**起一个本地 mihomo, 再让后续所有请求从节点出去 —— 即"用昨天的号给今天的号开路"。
+
+```
+sub.yaml (上一次的结果)
+   └─ scripts/make-proxy-config.js  只取 proxies, 规则改成 MATCH→url-test
+        └─ mihomo -d mihomo -f config.yaml   本地 127.0.0.1:7890
+             └─ PROXY_URL 传给脚本 → 浏览器 + 所有 API 都走代理
+```
+
+两个容易踩的坑:
+
+- **Node 自带的 `fetch` 不认 `HTTP_PROXY`**。所以脚本里所有 HTTP 都统一走
+  Playwright 的 request API (显式指定 proxy), 而不是 `fetch`。
+- **解验证码和注册必须同一个出口 IP** —— cap token 可能与 IP 绑定,
+  一半走代理一半直连会被拒。
+
+代理来源优先级: `secrets.BOOTSTRAP_PROXY` → 仓库里的 `sub.yaml` → 直连。
+任一步失败都会降级(打 warning)而不是直接让整个 job 挂掉。
+
+### 为什么 cron 是一天两次
+
+订阅是注册后**恰好 24 小时**到期, 而下一次运行要拿它当代理。
+按 24 小时跑的话, 轮到自己时上一份订阅刚好过期 —— 所以定成 12 小时一次
+(`23 2,14 * * *`), 保证自举用的节点最多只有 12 小时新。
+
+> ⚠️ **死锁风险**: 如果连续错过两个窗口 (workflow 被禁用 / 连续失败),
+> 仓库里的 `sub.yaml` 就彻底过期, 自举没了代理, 而直连又被封 → 再也跑不起来。
+> 保险做法是配一个**独立于本项目**的兜底代理:
+> 仓库 Settings → Secrets → Actions 里加 `BOOTSTRAP_PROXY`,
+> 值形如 `http://user:pass@host:port` 或 `socks5://host:port`。
 
 ## 自动化
 
-`.github/workflows/solve-challenge.yml` 每天 UTC 02:23 跑一次, 也可以在 Actions
-页面手动触发。脚本内置 3 次重试, 并且**写入前会校验**内容里必须含
+`.github/workflows/solve-challenge.yml` 每天 UTC 02:23 / 14:23 各跑一次, 也可以在
+Actions 页面手动触发。脚本内置 3 次重试, 并且**写入前会校验**内容里必须含
 `proxies:` / `proxy-groups:` / `rules:` 且长度 > 1000 字节 ——
 避免把报错页面覆盖掉一份可用的订阅。
-
-需要更保险的话, 在 `schedule` 里再加一行 cron (例如 `'23 14 * * *'`) 变成一天两次。
 
 > GitHub 会把**连续 60 天没有仓库活动**的定时任务自动停用。如果长期不管这个仓库,
 > 记得偶尔手动触发一次, 或者到 Actions 页面重新启用。
@@ -98,6 +131,7 @@ npm run solve
 
 ```
 scripts/solve-challenge.js   主脚本: 解验证码 → 注册 → 拉订阅 → 写文件
+scripts/make-proxy-config.js 把 sub.yaml 转成 mihomo 代理配置 (CI 自举用)
 vendor/cap-widget.js         站点实际使用的 cap widget (已验证可用)
 reference/                   抓包留档: widget.js 原件、instrumentation 解压结果、流程笔记
 sub.yaml                     产出: mihomo 订阅 (由 Actions 自动更新)

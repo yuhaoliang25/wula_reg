@@ -3,14 +3,14 @@ name: Update Subscription
 on:
   workflow_dispatch:
   schedule:
-    # 每天 UTC 02:23 (北京时间 10:23) 跑一次。
-    # 订阅是注册后 24h 到期, 想更保险可以再加一行, 例如 '23 14 * * *'。
-    - cron: '23 2 * * *'
+    # 一天两次 (UTC 02:23 / 14:23)。
+    # 必须是 12 小时而不是 24 小时 —— 订阅注册后 24h 到期, 而下一次运行要用
+    # 上一次的订阅当代理去连站点。按 24h 跑的话轮到自己时节点刚好过期。
+    - cron: '23 2,14 * * *'
 
 permissions:
   contents: write
 
-# 避免手动触发和定时任务同时跑, 造成 push 冲突
 concurrency:
   group: update-subscription
   cancel-in-progress: false
@@ -18,7 +18,7 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -36,8 +36,88 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
 
+      # 站点会封 GitHub Actions 的机房 IP, 所以先用"上一次拿到的订阅"
+      # 起一个本地 mihomo 代理, 后面所有请求都从节点出去。
+      # 优先级: BOOTSTRAP_PROXY secret > 仓库里的 sub.yaml > 直连
+      - name: Start mihomo proxy
+        id: proxy
+        env:
+          BOOTSTRAP_PROXY: ${{ secrets.BOOTSTRAP_PROXY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+
+          emit() { echo "url=$1" >> "$GITHUB_OUTPUT"; }
+
+          if [ -n "${BOOTSTRAP_PROXY:-}" ]; then
+            echo "使用 secrets.BOOTSTRAP_PROXY"
+            emit "$BOOTSTRAP_PROXY"
+            exit 0
+          fi
+
+          if [ ! -f sub.yaml ]; then
+            echo "::warning::仓库里没有 sub.yaml, 无法自举代理, 改为直连"
+            emit ""
+            exit 0
+          fi
+
+          mkdir -p mihomo
+
+          # 取最新的 linux-amd64 版本。
+          # 注意别被 mihomo-linux-amd64-v1-go120-*.gz 之类的变体骗了 ——
+          # 那是指定 GOAMD64 等级 / 旧 Go 编译的版本。要的是版本号直接跟在
+          # amd64- 后面、且以 .gz 结尾的那个基线版本。
+          asset=$(curl -sSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
+            | jq -r '.assets[] | select(.name | test("^mihomo-linux-amd64-v[0-9][^-]*\\.gz$")) | .browser_download_url' \
+            | head -1)
+
+          if [ -z "$asset" ]; then
+            echo "::warning::找不到 mihomo 下载地址, 改为直连"
+            emit ""
+            exit 0
+          fi
+
+          echo "下载 $asset"
+          curl -sSL "$asset" -o mihomo/mihomo.gz && gunzip -f mihomo/mihomo.gz && chmod +x mihomo/mihomo
+
+          node scripts/make-proxy-config.js sub.yaml mihomo/config.yaml || {
+            echo "::warning::生成 mihomo 配置失败, 改为直连"; emit ""; exit 0;
+          }
+
+          mihomo/mihomo -d mihomo -f mihomo/config.yaml > mihomo/mihomo.log 2>&1 &
+          echo $! > mihomo/mihomo.pid
+
+          # 等 url-test 选出一个真正连得通的节点 —— 直接拿目标站点当探针,
+          # 这样同时验证了"代理可用"和"目标站点通过代理可达"
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -s -m 8 -x http://127.0.0.1:7890 \
+                 -o /dev/null -w '' https://wulass.org/api/v1/guest/comm/config; then
+              ok=1; echo "代理就绪 (第 ${i} 次探测)"; break
+            fi
+            sleep 3
+          done
+
+          if [ -z "$ok" ]; then
+            echo "::warning::mihomo 代理不可用 (节点可能已过期), 改为直连"
+            tail -20 mihomo/mihomo.log || true
+            emit ""
+            exit 0
+          fi
+
+          emit "http://127.0.0.1:7890"
+
       - name: Register and fetch subscription
+        env:
+          PROXY_URL: ${{ steps.proxy.outputs.url }}
         run: npm run solve
+
+      - name: Stop mihomo
+        if: always()
+        run: |
+          [ -f mihomo/mihomo.pid ] && kill "$(cat mihomo/mihomo.pid)" 2>/dev/null || true
+          exit 0
 
       - name: Commit updated subscription
         run: |
@@ -54,7 +134,6 @@ jobs:
 
           git commit -m "chore: refresh subscription ($(date -u '+%Y-%m-%d %H:%M UTC'))"
 
-          # 定时任务和手动触发可能撞车, 失败就 rebase 后重试
           for i in 1 2 3; do
             if git push; then
               echo "推送成功"
@@ -65,12 +144,14 @@ jobs:
           done
           echo "::error::推送失败" && exit 1
 
-      - name: Upload logs on failure
+      - name: Upload debug logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: debug-output
           path: |
+            mihomo/mihomo.log
+            mihomo/config.yaml
             sub-info.json
           if-no-files-found: ignore
           retention-days: 3

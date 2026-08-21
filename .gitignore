@@ -3,3 +3,5 @@ npm-debug.log*
 *.log
 debug-screenshot.png
 challenge-result.json
+# CI 里临时下载的 mihomo 二进制和生成的代理配置 (含节点密码, 别提交)
+mihomo/
