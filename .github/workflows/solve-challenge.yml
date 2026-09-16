@@ -37,7 +37,7 @@ jobs:
 
       # 代理配置优先使用仓库里的 sub.yaml。
       # 只有仓库没有 sub.yaml 时才使用 BOOTSTRAP_PROXY。
-      # 不做预先的 wulass.org 连通性探测，直接让 solve 脚本通过 mihomo 访问。
+      # 不做 wulass.org 预探测，直接让 solve 脚本通过 mihomo 访问。
       - name: Start mihomo proxy
         id: proxy
         env:
@@ -101,7 +101,7 @@ jobs:
 
           if ! kill -0 "$MIHOMO_PID" 2>/dev/null; then
             echo "::error::mihomo 启动后立即退出。"
-            tail -80 mihomo/mihomo.log || true
+            tail -120 mihomo/mihomo.log || true
             exit 1
           fi
 
@@ -109,9 +109,25 @@ jobs:
           echo "url=http://127.0.0.1:7890" >> "$GITHUB_OUTPUT"
 
       - name: Register and fetch subscription
+        id: solve
+        continue-on-error: true
         env:
           PROXY_URL: ${{ steps.proxy.outputs.url }}
         run: npm run solve
+
+      # solve 失败时输出 mihomo 最后 200 行日志。
+      # 这里不主动探测 wulass.org，只用于判断失败发生在
+      # 本地代理、自动选择节点还是远端 TLS 建连阶段。
+      - name: Diagnose mihomo after solve failure
+        if: steps.solve.outcome == 'failure'
+        run: |
+          echo '===== mihomo process ====='
+          ps -ef | grep '[m]ihomo' || true
+          echo '===== mihomo log (last 200 lines) ====='
+          tail -200 mihomo/mihomo.log || true
+          echo '===== mihomo config strategy summary ====='
+          grep -nE '^(mixed-port:|mode:|proxy-groups:|  - name:|rules:|  - MATCH,)' mihomo/config.yaml | tail -100 || true
+          exit 1
 
       - name: Stop mihomo
         if: always()
