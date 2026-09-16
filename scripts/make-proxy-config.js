@@ -5,9 +5,10 @@
  *
  * 用法: node scripts/make-proxy-config.js [输入 sub.yaml] [输出 config.yaml]
  *
- * 这里只取 proxies 列表, 规则改成 MATCH → 代理节点。
- * 不在这里做 URL 健康探测：GitHub Actions 的网络环境可能导致探测目标
- * 本身失败，从而把本来可用的订阅误判成不可用。实际请求直接交给节点。
+ * 订阅本身已经包含代理策略组（例如“乌拉VPN”→“自动选择”）。
+ * 这里保留订阅里的 proxies 和 proxy-groups，只把 rules 收敛为
+ * MATCH → 订阅原有的主策略组，避免原订阅中的 DIRECT / GEOIP,CN
+ * 规则让 wulass.org 绕过代理。
  */
 
 const fs = require('fs');
@@ -37,11 +38,20 @@ if (!proxies.length) {
   process.exit(1);
 }
 
-// 使用 select 而不是 url-test：不做 Cloudflare/其它站点的预测速。
-// 默认直接使用订阅中的第一个节点；如需指定节点，可通过 MIHOMO_PROXY_NAME。
-const selectedName = process.env.MIHOMO_PROXY_NAME || proxies[0].name;
-if (!proxies.some((p) => p.name === selectedName)) {
-  console.error(`指定的 MIHOMO_PROXY_NAME 不存在: ${selectedName}`);
+const groups = Array.isArray(doc['proxy-groups']) ? doc['proxy-groups'] : [];
+if (!groups.length) {
+  console.error('订阅里没有 proxy-groups，无法使用订阅自带的策略。');
+  process.exit(1);
+}
+
+// 优先使用订阅的主策略组“乌拉VPN”；该组当前包含“自动选择”，
+// 因此会继续使用订阅自己的自动选择策略，而不是人为指定第一个节点。
+let mainGroup = groups.find((g) => g && g.name === '乌拉VPN');
+if (!mainGroup) mainGroup = groups.find((g) => g && g.name === '自动选择');
+if (!mainGroup) mainGroup = groups.find((g) => g && g.name);
+
+if (!mainGroup || !mainGroup.name) {
+  console.error('找不到可用的主策略组。');
   process.exit(1);
 }
 
@@ -49,22 +59,18 @@ const config = {
   'mixed-port': PORT,
   'allow-lan': false,
   mode: 'rule',
-  'log-level': 'warning',
+  'log-level': 'info',
   ipv6: false,
-  // 关闭内置 DNS，节点连接使用系统解析结果，减少 CI 中的额外变量。
-  dns: { enable: false },
+  // 保留订阅 DNS 配置，避免改变原订阅的解析策略。
+  ...(doc.dns ? { dns: doc.dns } : {}),
   proxies,
-  'proxy-groups': [
-    {
-      name: 'PROXY',
-      type: 'select',
-      proxies: [selectedName],
-    },
-  ],
-  rules: ['MATCH,PROXY'],
+  // 完整保留订阅自己的策略组，包括“自动选择”。
+  'proxy-groups': groups,
+  // CI 中所有请求都必须经过订阅自己的主策略组。
+  rules: [`MATCH,${mainGroup.name}`],
 };
 
 fs.mkdirSync(path.dirname(dest), { recursive: true });
 fs.writeFileSync(dest, yaml.dump(config, { lineWidth: -1 }));
 
-console.log(`已生成 ${path.relative(process.cwd(), dest)}: ${proxies.length} 个节点, 当前节点 ${selectedName}, 端口 ${PORT}`);
+console.log(`已生成 ${path.relative(process.cwd(), dest)}: ${proxies.length} 个节点, 主策略 ${mainGroup.name}, 端口 ${PORT}`);
