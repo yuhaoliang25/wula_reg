@@ -35,79 +35,38 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
 
-      # 使用 BOOTSTRAP_PROXY 指定的 YAML 订阅作为 mihomo 配置来源。
-      #
-      # 优先级：
-      #   1. BOOTSTRAP_PROXY secret -> 下载 YAML -> mihomo
-      #   2. 仓库里的 sub.yaml       -> mihomo
-      #   3. 没有代理配置             -> 直连
-      #
-      # 注意：
-      # BOOTSTRAP_PROXY 现在不再是代理地址，而是 YAML 文件/订阅 URL。
+      # 代理配置优先使用仓库里的 sub.yaml。
+      # 只有仓库没有 sub.yaml 时才使用 BOOTSTRAP_PROXY。
+      # 代理初始化/探测失败时直接让 Action 失败，禁止静默降级为直连。
       - name: Start mihomo proxy
         id: proxy
         env:
           BOOTSTRAP_PROXY: ${{ secrets.BOOTSTRAP_PROXY }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -uo pipefail
-
-          emit() {
-            echo "url=$1" >> "$GITHUB_OUTPUT"
-          }
+          set -euo pipefail
 
           mkdir -p mihomo
 
-          # ------------------------------------------------------------
-          # 1. 如果设置了 BOOTSTRAP_PROXY：
-          #    把它当作 YAML URL 下载下来
-          # ------------------------------------------------------------
-          if [ -n "${BOOTSTRAP_PROXY:-}" ]; then
-            echo "使用 BOOTSTRAP_PROXY 提供的 YAML 配置"
-
-            if ! curl -fsSL \
+          if [ -s sub.yaml ]; then
+            echo "使用仓库中的 sub.yaml"
+            SUB_CONFIG="sub.yaml"
+          elif [ -n "${BOOTSTRAP_PROXY:-}" ]; then
+            echo "仓库中没有 sub.yaml，使用 BOOTSTRAP_PROXY"
+            curl -fsSL \
+              --retry 3 \
               --connect-timeout 15 \
               --max-time 60 \
               "$BOOTSTRAP_PROXY" \
-              -o mihomo/sub.yaml; then
-
-              echo "::warning::无法下载 BOOTSTRAP_PROXY 指定的 YAML"
-              emit ""
-              exit 0
-            fi
-
-            if [ ! -s mihomo/sub.yaml ]; then
-              echo "::warning::下载得到的 YAML 文件为空"
-              emit ""
-              exit 0
-            fi
-
-            echo "YAML 下载成功"
-            echo "文件大小: $(wc -c < mihomo/sub.yaml) bytes"
-
+              -o mihomo/sub.yaml
+            test -s mihomo/sub.yaml
             SUB_CONFIG="mihomo/sub.yaml"
-
-          # ------------------------------------------------------------
-          # 2. 没有 BOOTSTRAP_PROXY，则使用仓库里的 sub.yaml
-          # ------------------------------------------------------------
-          elif [ -f sub.yaml ]; then
-            echo "使用仓库中的 sub.yaml"
-
-            SUB_CONFIG="sub.yaml"
-
-          # ------------------------------------------------------------
-          # 3. 没有任何代理配置
-          # ------------------------------------------------------------
           else
-            echo "::warning::没有 BOOTSTRAP_PROXY，也没有 sub.yaml，改为直连"
-            emit ""
-            exit 0
+            echo "::error::没有可用的代理订阅：sub.yaml 不存在且 BOOTSTRAP_PROXY 为空。"
+            exit 1
           fi
 
-          # ------------------------------------------------------------
-          # 下载最新 mihomo
-          # ------------------------------------------------------------
-          asset=$(curl -sSL \
+          asset=$(curl -fsSL \
             -H "Authorization: Bearer $GH_TOKEN" \
             https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
             | jq -r \
@@ -117,120 +76,74 @@ jobs:
             | head -1)
 
           if [ -z "$asset" ]; then
-            echo "::warning::找不到 mihomo 下载地址，改为直连"
-            emit ""
-            exit 0
+            echo "::error::找不到 mihomo 下载地址。"
+            exit 1
           fi
 
-          echo "下载 mihomo"
-
-          if ! curl -fsSL "$asset" \
-            -o mihomo/mihomo.gz; then
-
-            echo "::warning::mihomo 下载失败，改为直连"
-            emit ""
-            exit 0
-          fi
-
-          if ! gunzip -f mihomo/mihomo.gz; then
-            echo "::warning::mihomo 解压失败，改为直连"
-            emit ""
-            exit 0
-          fi
-
+          curl -fsSL --retry 3 "$asset" -o mihomo/mihomo.gz
+          gunzip -f mihomo/mihomo.gz
           chmod +x mihomo/mihomo
 
-          # ------------------------------------------------------------
-          # 根据订阅节点生成 mihomo 配置
-          # ------------------------------------------------------------
-          if ! node scripts/make-proxy-config.js \
+          node scripts/make-proxy-config.js \
             "$SUB_CONFIG" \
-            mihomo/config.yaml; then
+            mihomo/config.yaml
 
-            echo "::warning::生成 mihomo 配置失败，改为直连"
-            emit ""
-            exit 0
-          fi
-
-          # ------------------------------------------------------------
-          # 启动 mihomo
-          # ------------------------------------------------------------
           mihomo/mihomo \
             -d mihomo \
             -f mihomo/config.yaml \
             > mihomo/mihomo.log 2>&1 &
 
-          echo $! > mihomo/mihomo.pid
+          MIHOMO_PID=$!
+          echo "$MIHOMO_PID" > mihomo/mihomo.pid
+
+          cleanup() {
+            if kill -0 "$MIHOMO_PID" 2>/dev/null; then
+              kill "$MIHOMO_PID" || true
+              wait "$MIHOMO_PID" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
 
           echo "mihomo 已启动，等待代理就绪..."
 
-          # ------------------------------------------------------------
-          # 等待 mihomo 选出可用节点
-          #
-          # 直接使用 wulass.org 作为探针：
-          # 同时验证：
-          #   1. mihomo 已经启动
-          #   2. 节点能够正常连接
-          #   3. wulass.org 能通过该节点访问
-          # ------------------------------------------------------------
-          ok=""
-
           for i in $(seq 1 30); do
-            if curl -s \
+            if curl -fsS \
               -m 8 \
               -x http://127.0.0.1:7890 \
               -o /dev/null \
               https://wulass.org/api/v1/guest/comm/config; then
-
-              ok=1
               echo "代理就绪（第 ${i} 次探测）"
-              break
+              echo "url=http://127.0.0.1:7890" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            if ! kill -0 "$MIHOMO_PID" 2>/dev/null; then
+              echo "::error::mihomo 进程已经退出。"
+              tail -80 mihomo/mihomo.log || true
+              exit 1
             fi
 
             sleep 3
           done
 
-          # ------------------------------------------------------------
-          # 代理不可用
-          # ------------------------------------------------------------
-          if [ -z "$ok" ]; then
-            echo "::warning::mihomo 代理不可用，改为直连"
+          echo "::error::mihomo 代理不可用，拒绝降级为直连。"
+          echo "---------- mihomo.log ----------"
+          tail -80 mihomo/mihomo.log || true
+          echo "--------------------------------"
+          exit 1
 
-            echo "---------- mihomo.log ----------"
-            tail -30 mihomo/mihomo.log || true
-            echo "--------------------------------"
-
-            emit ""
-            exit 0
-          fi
-
-          # ------------------------------------------------------------
-          # 给 Playwright 使用本地 mihomo
-          # ------------------------------------------------------------
-          emit "http://127.0.0.1:7890"
-
-      # --------------------------------------------------------------
-      # 注册并获取新的订阅
-      # --------------------------------------------------------------
       - name: Register and fetch subscription
         env:
           PROXY_URL: ${{ steps.proxy.outputs.url }}
         run: npm run solve
 
-      # --------------------------------------------------------------
-      # 停止 mihomo
-      # --------------------------------------------------------------
       - name: Stop mihomo
         if: always()
         run: |
           if [ -f mihomo/mihomo.pid ]; then
             kill "$(cat mihomo/mihomo.pid)" 2>/dev/null || true
           fi
-          exit 0
 
-      # --------------------------------------------------------------
-      # 提交更新后的订阅
-      # --------------------------------------------------------------
       - name: Commit updated subscription
         run: |
           set -euo pipefail
@@ -265,9 +178,6 @@ jobs:
           echo "::error::推送失败"
           exit 1
 
-      # --------------------------------------------------------------
-      # 失败时上传 mihomo 日志
-      # --------------------------------------------------------------
       - name: Upload debug logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -279,4 +189,3 @@ jobs:
             sub-info.json
           if-no-files-found: ignore
           retention-days: 3
-
