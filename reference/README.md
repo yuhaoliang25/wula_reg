@@ -105,6 +105,9 @@ sub.yaml (上一次的结果)
 代理来源优先级: `secrets.BOOTSTRAP_PROXY` → 仓库里的 `sub.yaml` → 直连。
 任一步失败都会降级(打 warning)而不是直接让整个 job 挂掉。
 
+# 注意： # BOOTSTRAP_PROXY 现在不再是代理地址，而是 YAML 文件/订阅 URL。
+
+
 ### 为什么 cron 是一天两次
 
 订阅是注册后**恰好 24 小时**到期, 而下一次运行要拿它当代理。
