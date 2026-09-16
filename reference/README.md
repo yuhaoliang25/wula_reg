@@ -106,7 +106,12 @@ sub.yaml (上一次的结果)
 任一步失败都会降级(打 warning)而不是直接让整个 job 挂掉。
 
 # 注意： # BOOTSTRAP_PROXY 现在不再是代理地址，而是 YAML 文件/订阅 URL。
-
+优先使用仓库现有的 sub.yaml，不再因为 BOOTSTRAP_PROXY Secret 存在就把它覆盖掉。
+sub.yaml 不存在时，才使用 BOOTSTRAP_PROXY。
+mihomo 下载失败、配置生成失败、启动失败、代理探测失败时，不再偷偷切换成直连，而是让 Action 失败。
+mihomo 进程如果中途退出，会立即报错并输出日志。
+代理探测失败时输出最近 80 行 mihomo.log，方便直接定位原因。
+成功后仍然通过 http://127.0.0.1:7890 给 npm run solve 使用。
 
 ### 为什么 cron 是一天两次
 
