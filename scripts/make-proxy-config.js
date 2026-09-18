@@ -9,7 +9,7 @@ const doc=yaml.load(fs.readFileSync(src,'utf8'));
 const proxies=Array.isArray(doc?.proxies)?doc.proxies.filter(p=>p&&p.name&&p.server&&p.port&&p.type):[];
 if(!proxies.length) throw new Error('bootstrap 里没有可用节点');
 const config={
-  'mixed-port':PORT,'allow-lan':false,mode:'rule','log-level':'info',ipv6:false,'unified-delay':true,
+  'mixed-port':PORT,'allow-lan':false,'external-controller':'127.0.0.1:9090',mode:'rule','log-level':'info',ipv6:false,'unified-delay':true,
   proxies,
   'proxy-groups':[{name:'WULA_AUTO',type:'url-test',url:TARGET,interval:20,tolerance:80,timeout:8000,lazy:false,proxies:proxies.map(p=>p.name)}],
   rules:['MATCH,WULA_AUTO']
