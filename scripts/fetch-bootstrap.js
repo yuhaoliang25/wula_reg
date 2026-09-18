@@ -49,6 +49,10 @@ function sanitizeProxy(raw) {
     return { proxy: null, reason: 'ss-missing-auth' };
   }
 
+  if (p['reality-opts'] != null && !['vless', 'vmess', 'trojan'].includes(type)) {
+    return { proxy: null, reason: 'reality-unsupported-protocol' };
+  }
+
   if (p['reality-opts'] != null) {
     const reality = p['reality-opts'];
     if (!reality || typeof reality !== 'object' || Array.isArray(reality)) {
