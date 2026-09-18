@@ -54,24 +54,16 @@ jobs:
             tail -200 mihomo/mihomo.log || true
             exit 1
           fi
-      - name: Find a working node for wulass.org
+      - name: Test every node and select fastest
         env:
           WULA_HEALTH_URL: https://wulass.org/api/v1/guest/comm/config
+          WULA_EXPECTED_STATUS: '200'
+          WULA_HEALTH_TIMEOUT: '8000'
         run: |
           set -euo pipefail
-          echo "开始通过 WULA_AUTO 检测实际可用出口..."
-          for i in 1 2 3 4 5 6; do
-            if curl -fsS --proxy http://127.0.0.1:7890 --connect-timeout 8 --max-time 20 -H 'Accept: application/json' "$WULA_HEALTH_URL" -o /tmp/wula-config.json; then
-              if jq -e '.data != null' /tmp/wula-config.json >/dev/null 2>&1; then
-                echo "✓ wulass.org 可达，自动节点选择成功"
-                exit 0
-              fi
-            fi
-            echo "第 $i 次健康检查失败，等待自动切换..."
-            sleep 10
-          done
-          echo "::error::节点池中暂时没有能访问 wulass.org 的节点"
-          exit 1
+          node scripts/check-proxies.js
+          echo "===== selected proxy ====="
+          curl -fsS http://127.0.0.1:9090/proxies/WULA_AUTO | jq '{now,fixed,expectedStatus,all}'
       - name: Register and fetch subscription
         id: solve
         env:
@@ -115,6 +107,7 @@ jobs:
             mihomo/mihomo.log
             mihomo/config.yaml
             mihomo/bootstrap.yaml
+            mihomo/health-report.json
             sub-info.json
           if-no-files-found: ignore
           retention-days: 3
