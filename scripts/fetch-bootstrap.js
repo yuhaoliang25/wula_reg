@@ -10,6 +10,7 @@ const SOURCES = [
   'https://raw.githubusercontent.com/mfuu/v2ray/master/clash.yaml',
   'https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/clash.yml',
   'https://raw.githubusercontent.com/ripaojiedian/freenode/main/clash',
+  'https://raw.githubusercontent.com/Barabama/FreeNodes/refs/heads/feat/ai-crawler-v2/nodes/merged.yaml'
 ];
 
 async function download(url) {
