@@ -146,6 +146,19 @@ sub.yaml                     产出: mihomo 订阅 (由 Actions 自动更新)
 sub-info.json                产出: 刷新时间 / 到期时间 / 流量 / 节点数
 ```
 
+## 新的逻辑：
+新增 scripts/fetch-bootstrap.js
+它现在不会再依赖一个固定节点。
+url-test 自动检测：
+https://wulass.org/api/v1/guest/comm/config
+     │
+     ├─ 节点 A ❌
+     ├─ 节点 B ❌
+     ├─ 节点 C ✅
+     └─ 节点 D ...
+直到找到能访问 wulass.org 的出口，遍历结束
+
+
 ## 免责声明
 
 仅用于个人学习与自动化实践。请遵守目标站点的服务条款, 不要滥用。
