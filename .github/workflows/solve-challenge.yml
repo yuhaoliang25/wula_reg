@@ -3,7 +3,6 @@ name: Update Subscription
 on:
   workflow_dispatch:
   schedule:
-    # 每 6 小时运行一次
     - cron: '0 */6 * * *'
 
 permissions:
@@ -17,159 +16,96 @@ jobs:
   update:
     environment: boot
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-
       - name: Install dependencies
         run: npm ci
-
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
-
-      # 代理配置优先使用仓库里的 sub.yaml。
-      # 只有仓库没有 sub.yaml 时才使用 BOOTSTRAP_PROXY。
-      # 不做 wulass.org 预探测，直接让 solve 脚本通过 mihomo 访问。
-      - name: Start mihomo proxy
-        id: proxy
+      - name: Prepare fresh bootstrap node pool
+        run: |
+          set -euo pipefail
+          mkdir -p mihomo
+          node scripts/fetch-bootstrap.js mihomo/bootstrap.yaml
+      - name: Install latest mihomo
         env:
-          BOOTSTRAP_PROXY: ${{ secrets.BOOTSTRAP_PROXY }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-
-          mkdir -p mihomo
-
-          if [ -s sub.yaml ]; then
-            echo "使用仓库中的 sub.yaml"
-            SUB_CONFIG="sub.yaml"
-          elif [ -n "${BOOTSTRAP_PROXY:-}" ]; then
-            echo "仓库中没有 sub.yaml，使用 BOOTSTRAP_PROXY"
-            curl -fsSL \
-              --retry 3 \
-              --connect-timeout 15 \
-              --max-time 60 \
-              "$BOOTSTRAP_PROXY" \
-              -o mihomo/sub.yaml
-            test -s mihomo/sub.yaml
-            SUB_CONFIG="mihomo/sub.yaml"
-          else
-            echo "::error::没有可用的代理订阅：sub.yaml 不存在且 BOOTSTRAP_PROXY 为空。"
-            exit 1
-          fi
-
-          asset=$(curl -fsSL \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
-            | jq -r \
-              '.assets[]
-              | select(.name | test("^mihomo-linux-amd64-v[0-9][^-]*\\.gz$"))
-              | .browser_download_url' \
-            | head -1)
-
-          if [ -z "$asset" ]; then
-            echo "::error::找不到 mihomo 下载地址。"
-            exit 1
-          fi
-
+          asset=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | jq -r '.assets[] | select(.name | test("^mihomo-linux-amd64-v[0-9][^-]*\\.gz$")) | .browser_download_url' | head -1)
+          test -n "$asset"
           curl -fsSL --retry 3 "$asset" -o mihomo/mihomo.gz
           gunzip -f mihomo/mihomo.gz
           chmod +x mihomo/mihomo
-
-          node scripts/make-proxy-config.js \
-            "$SUB_CONFIG" \
-            mihomo/config.yaml
-
-          mihomo/mihomo \
-            -d mihomo \
-            -f mihomo/config.yaml \
-            > mihomo/mihomo.log 2>&1 &
-
+          node scripts/make-proxy-config.js mihomo/bootstrap.yaml mihomo/config.yaml
+          mihomo/mihomo -d mihomo -f mihomo/config.yaml > mihomo/mihomo.log 2>&1 &
           MIHOMO_PID=$!
           echo "$MIHOMO_PID" > mihomo/mihomo.pid
-
-          # 给 mihomo 少量启动时间，然后直接把本地代理交给 solve。
-          sleep 3
-
+          sleep 5
           if ! kill -0 "$MIHOMO_PID" 2>/dev/null; then
-            echo "::error::mihomo 启动后立即退出。"
-            tail -120 mihomo/mihomo.log || true
+            echo "::error::mihomo 启动失败"
+            tail -200 mihomo/mihomo.log || true
             exit 1
           fi
-
-          echo "mihomo 已启动，不进行 wulass.org 预探测。"
-          echo "url=http://127.0.0.1:7890" >> "$GITHUB_OUTPUT"
-
+      - name: Find a working node for wulass.org
+        env:
+          WULA_HEALTH_URL: https://wulass.org/api/v1/guest/comm/config
+        run: |
+          set -euo pipefail
+          echo "开始通过 WULA_AUTO 检测实际可用出口..."
+          for i in 1 2 3 4 5 6; do
+            if curl -fsS --proxy http://127.0.0.1:7890 --connect-timeout 8 --max-time 20 -H 'Accept: application/json' "$WULA_HEALTH_URL" -o /tmp/wula-config.json; then
+              if jq -e '.data != null' /tmp/wula-config.json >/dev/null 2>&1; then
+                echo "✓ wulass.org 可达，自动节点选择成功"
+                exit 0
+              fi
+            fi
+            echo "第 $i 次健康检查失败，等待自动切换..."
+            sleep 10
+          done
+          echo "::error::节点池中暂时没有能访问 wulass.org 的节点"
+          exit 1
       - name: Register and fetch subscription
         id: solve
-        continue-on-error: true
         env:
-          PROXY_URL: ${{ steps.proxy.outputs.url }}
+          PROXY_URL: http://127.0.0.1:7890
         run: npm run solve
-
-      # solve 失败时输出 mihomo 最后 200 行日志。
-      # 这里不主动探测 wulass.org，只用于判断失败发生在
-      # 本地代理、自动选择节点还是远端 TLS 建连阶段。
       - name: Diagnose mihomo after solve failure
         if: steps.solve.outcome == 'failure'
         run: |
           echo '===== mihomo process ====='
           ps -ef | grep '[m]ihomo' || true
-          echo '===== mihomo log (last 200 lines) ====='
-          tail -200 mihomo/mihomo.log || true
-          echo '===== mihomo config strategy summary ====='
-          grep -nE '^(mixed-port:|mode:|proxy-groups:|  - name:|rules:|  - MATCH,)' mihomo/config.yaml | tail -100 || true
+          echo '===== mihomo log (last 250 lines) ====='
+          tail -250 mihomo/mihomo.log || true
+          echo '===== generated proxy groups ====='
+          grep -nE '^(proxy-groups:|  - name: WULA_AUTO|    type: url-test|    url:|    interval:)' mihomo/config.yaml || true
           exit 1
-
       - name: Stop mihomo
         if: always()
         run: |
-          if [ -f mihomo/mihomo.pid ]; then
-            kill "$(cat mihomo/mihomo.pid)" 2>/dev/null || true
-          fi
-
+          if [ -f mihomo/mihomo.pid ]; then kill "$(cat mihomo/mihomo.pid)" 2>/dev/null || true; fi
       - name: Commit updated subscription
         run: |
           set -euo pipefail
-
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-
           git add sub.yaml sub-info.json
-
-          if git diff --cached --quiet; then
-            echo "订阅内容无变化，跳过提交"
-            exit 0
-          fi
-
-          git commit \
-            -m "chore: refresh subscription ($(date -u '+%Y-%m-%d %H:%M UTC'))"
-
+          if git diff --cached --quiet; then echo "订阅内容无变化，跳过提交"; exit 0; fi
+          git commit -m "chore: refresh subscription ($(date -u '+%Y-%m-%d %H:%M UTC'))"
           for i in 1 2 3; do
-            if git push; then
-              echo "推送成功"
-              exit 0
-            fi
-
+            if git push; then echo "推送成功"; exit 0; fi
             echo "推送失败，第 $i 次重试..."
-
-            git pull \
-              --rebase \
-              --autostash \
-              origin "${GITHUB_REF_NAME}"
+            git pull --rebase --autostash origin "$GITHUB_REF_NAME"
           done
-
           echo "::error::推送失败"
           exit 1
-
       - name: Upload debug logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -178,6 +114,7 @@ jobs:
           path: |
             mihomo/mihomo.log
             mihomo/config.yaml
+            mihomo/bootstrap.yaml
             sub-info.json
           if-no-files-found: ignore
           retention-days: 3
