@@ -149,6 +149,7 @@ sub-info.json                产出: 刷新时间 / 到期时间 / 流量 / 节�
 ## 新的逻辑：
 新增 scripts/fetch-bootstrap.js
 它现在不会再依赖一个固定节点。
+先爬取，再筛选（删除坏节点、mihomo不兼容的、重复的节点）
 url-test 自动检测：
 https://wulass.org/api/v1/guest/comm/config
      │
